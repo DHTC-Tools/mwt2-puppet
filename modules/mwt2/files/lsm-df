@@ -1,0 +1,44 @@
+#!/usr/bin/python
+# lsm-df: return free space in megabytes
+#
+# $Id: lsm-df,v 1.1 2011/03/14 21:09:23 nathany Exp $
+#
+# For now, instead of getting correct dCache space information,
+# we lie and always say 10TB is free
+
+import sys, os, time
+from lsm import *
+import lsm
+
+DEFAULT_SPACE=10*1024*1024
+lsm.LOGFILE='/var/log/lsm/lsm-df.log'
+
+log(' '.join(sys.argv))
+args=sys.argv[1:]
+while args and args[0].startswith('-'): #Skip all cmd-line flags
+    args.pop(0)
+arg = args and args[0]
+
+if not arg or '/pnfs/uchicago.edu' in arg:
+    log("return %s"%DEFAULT_SPACE)
+    print DEFAULT_SPACE
+    sys.exit(0)
+    
+p=os.popen('df -P -B1M %s'%arg)
+lines=p.readlines()
+status=p.close()
+
+if status:
+    fail(200, "FAILED")
+
+try:
+    result = lines[1].split()[3]
+except:
+    result = None
+
+if result:
+    log("0 OK %s" % result)
+    print result
+    sys.exit(0)
+else:
+    fail(200, "FAILED")

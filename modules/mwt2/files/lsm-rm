@@ -1,0 +1,42 @@
+#!/usr/bin/python
+# lsm-rm:  delete files and directories from /scratch or dcache
+#
+# $Id: lsm-rm,v 1.1 2011/03/14 21:09:23 nathany Exp $
+
+import sys, os, time
+from lsm import *
+import lsm
+
+lsm.LOGFILE='/var/log/lsm/lsm-rm.log'
+
+def try_delete(name):
+    try:
+        if os.path.isdir(name):
+            os.rmdir(name)
+        else:
+            os.unlink(name)
+    except:
+        exc,msg,tb=sys.exc_info()
+        fail(200, msg)
+        
+log(' '.join(sys.argv))
+args=sys.argv[1:]
+while args and args[0].startswith('-'): #Skip all cmd-line flags
+    args.pop(0)
+
+if len(args) != 1:
+    fail(202, "Invalid command")
+    
+arg=args[0]
+if arg.startswith('/scratch'):
+    try_delete(arg)
+else:
+    index = arg.find('/pnfs/uchicago.edu')
+    if index>0:
+        try_delete(arg[index:])
+    else:
+        fail(200, "cannot delete %s"%arg)
+
+log("0 OK")
+
+

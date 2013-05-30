@@ -1,0 +1,204 @@
+#!/usr/bin/python
+
+
+# lsm-get: retrieve files from storage element to local disk
+# 
+# $Id: lsm-get,v 1.23 2011/09/20 15:33:56 sarah Exp $
+#
+# lsm-get [-t token] [--size N] [--checksum csum] [---guid]
+
+import sys, os, stat, time, zlib, hashlib
+from lsm import *
+import lsm
+
+#Tunable parameters
+PCACHE_TIMEOUT=5380
+PCACHE_RETRIES=5
+PCACHE_MAX_SPACE="80%"
+PERM_DIR=0775
+PERM_FILE=0664
+PNFSROOT='/pnfs'
+PANDA_SITE_NAME='MWT2_UC,ANALY_MWT2'
+
+XRD_PREFIX="root://xrd.mwt2.org//atlas"
+
+lsm.LOGFILE='/var/log/lsm/lsm-get.log'
+
+
+def adler32(fname):
+    """Compute the adler32 checksum of the file, with seed value 1"""
+    BLOCKSIZE = 4096 * 1024
+    f = open(fname,'r')
+    checksum = 1 #Important - dCache uses seed of 1 not 0
+    while True:
+        data = f.read(BLOCKSIZE)
+        if not data: 
+	    break
+        checksum = zlib.adler32(data, checksum)
+    f.close()
+    # Work around problem with negative checksum
+    if checksum < 0:
+        checksum += 2**32
+    return hex(checksum)[2:10].zfill(8).lower()
+
+def md5sum(fname):
+    BLOCKSIZE = 4096 * 1024
+    f = open(fname,'r')
+    checksum = md5.md5()
+    while True:
+        data = f.read(BLOCKSIZE)
+        if not data:
+            break
+        checksum.update(data)
+    f.close()
+    return checksum.hexdigest().lower()
+
+
+token=None
+size=None
+checksumtype=None
+checksumval=None
+guid=None
+
+log(' '.join(sys.argv))
+
+args = sys.argv[1:]
+while args and args[0].startswith('-'):
+    arg = args.pop(0)
+    val = args.pop(0)
+    if arg=='-t':
+        token = val
+    elif arg=='--size' or arg=='-s':
+        size = int(val)
+    elif arg=='--guid' or arg=='-g':
+        guid = val
+    elif arg=='--checksum' or arg=='-c':
+        if ':' in val:
+            checksumtype, checksumval = val.split(':')
+        else:
+            checksumtype = "md5"
+            checksumval = val
+        checksumval = checksumval.lower()
+        if checksumtype.startswith('md5'):
+            checksumfunc = md5sum
+        elif checksumtype.startswith('ad'):
+            checksumfunc = adler32
+        else:
+            fail(202, "Unsupported checksum type %s" % checksumtype)
+
+if len(args) != 2:
+    fail(202, "Invalid command")
+    sys.exit(1)
+
+src_url, dest = args
+index = src_url.find(PNFSROOT)
+if index >= 0:
+    src = src_url[index:]
+else:
+    fail(202, "Invalid command")
+
+## Check for 'file exists'
+if os.path.isfile(dest):
+    ### * 211 - File already exist and is different (size/checksum).
+    ### * 212 - File already exist and is the same as the source (same size/checksum)
+    fsize = None
+    if size:
+        try:
+            fsize = os.stat(dest)[stat.ST_SIZE]
+        except:
+            fsize = "UNKNOWN"
+    fchecksumval = None
+    if checksumval:
+        t = Timer()
+        try:
+            fchecksumval = checksumfunc(dest)
+            log("local checksum took %s seconds for %s byte file,  %.2f b/s"
+                % (t,fsize, fsize/float(t)) )
+        except Exception,e:
+            fchecksumval = "UNKNOWN"
+            log("%s failed with: %s" % (checksumfunc, e) )
+    if fchecksumval != checksumval or fsize != size:
+        fail(211, "%s size:%s %s, checksum: %s %s"%
+             (dest, fsize, size, fchecksumval, checksumval))
+    else:
+        fail(212, "%s: File exists" % dest)
+
+if os.path.isdir(dest) and not dest.endswith('/'):
+    dest += '/'
+if dest.endswith('/'):
+    basename = src.split('/')[-1]
+    dest += basename
+
+dirname, filename = os.path.split(dest)
+if not os.path.exists(dirname):
+    try:
+        os.makedirs(dirname,PERM_DIR)
+    except:
+        ##Might already exist, created by another process
+        pass
+
+if not os.path.exists(dirname):
+    fail(206, "Cannot create %s" % dirname)
+    
+cmd = "pcache.py -P -S " + PANDA_SITE_NAME
+if guid:
+    cmd += " -g %s" % guid
+#XRDCP version
+#cmd += " -t %s -r %s -m %s xrdcp -x %s%s %s 2>&1" % (
+#	PCACHE_TIMEOUT, PCACHE_RETRIES, PCACHE_MAX_SPACE, XRD_PREFIX, src, dest)
+cmd += " -t %s -r %s -m %s dccp -X-io-queue=fast %s %s 2>&1" % (
+   PCACHE_TIMEOUT, PCACHE_RETRIES, PCACHE_MAX_SPACE, src, dest)
+
+
+t = Timer()
+p = os.popen(cmd)
+output = p.read()
+if output:
+    log(output)
+status = p.close()
+
+if not status:
+    log("transfer took %s seconds for a %s byte file,  %.2f b/s" % (t,size, size/float(t)) )
+
+if status:
+    ##Transfer failed.  Could retry, but that's already
+    ## done inside of pcache
+    if os.path.exists(dest):
+        try:
+            os.unlink(dest)
+        except:
+            pass
+    log("Command failed with status %s" % status)
+    fail(201, "Copy command failed")
+
+if not os.path.exists(dest):
+    log("Command exited successfully but dest file does not exist")
+    fail(201, "Copy command failed")
+
+try:
+    os.chmod(dest, PERM_FILE)
+except:
+    pass
+
+## Verify size/checksum if asked for
+### XXXXX TODO move this to pcache
+if size:
+    try:
+        fsize = os.stat(dest)[stat.ST_SIZE]
+    except:
+        fsize = "UNKNOWN"
+    if size != fsize:
+        fail(204, "Size mismatch %s!=%s"%(fsize,size))
+
+if checksumval:
+    t = Timer()
+    try:
+        fchecksumval = checksumfunc(dest)
+        log("local checksum took %s seconds for %s byte file,  %.2f b/s" % (t,fsize, fsize/float(t)) )
+    except Exception,e:
+        fchecksumval = "UNKNOWN"
+        log("%s failed with: %s" % (checksumfunc, e) )
+    if fchecksumval != checksumval:
+        fail(205, "Checksum mismatch %s!=%s"%(fchecksumval, checksumval))
+        
+log("0 OK")
